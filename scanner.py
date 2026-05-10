@@ -871,29 +871,51 @@ def scan_file():
                     print(f"\n{YELLOW}[~] Hash not found in database. "
                           f"This file is unique or new.{RESET}")
 
-                    # ── Non-blocking 10s countdown with simultaneous input ─────
-                    PROMPT = (f"{YELLOW}[?] Upload full file for real-time scan?"
-                              f" (y/n)")
-                    answer = None
+                    # ── Threading-based 10s countdown ─────────────────────────
+                    # Input thread reads stdin, main thread drives the clock.
+                    answer_box  = {'val': None}
+                    input_done  = threading.Event()
 
-                    for t in range(10, 0, -1):
-                        # Overwrite same line with updated countdown each second
-                        print(f"\r{PROMPT} [{t:02d}s] : {RESET}",
-                              end='', flush=True)
-                        ready, _, _ = select.select([sys.stdin], [], [], 1)
-                        if ready:
-                            answer = sys.stdin.readline().strip().lower()
-                            break
+                    def _read_input():
+                        try:
+                            line = sys.stdin.readline()
+                            answer_box['val'] = line.strip().lower()
+                        except Exception:
+                            pass
+                        finally:
+                            input_done.set()
 
-                    print()  # newline after countdown or typed input
+                    PROMPT = (f"{YELLOW}[?] Upload full file for "
+                              f"real-time scan? (y/n)")
 
+                    # Show first tick before starting the thread
+                    print(f"\r{PROMPT} [10s] : {RESET}",
+                          end='', flush=True)
+
+                    input_thread = threading.Thread(
+                        target=_read_input, daemon=True
+                    )
+                    input_thread.start()
+
+                    # Count: 9 → 0 (9 more ticks = 10s total)
+                    for remaining in range(9, -1, -1):
+                        if input_done.wait(timeout=1):
+                            break          # user pressed Enter
+                        if remaining > 0:
+                            print(f"\r{PROMPT} [{remaining:02d}s] : {RESET}",
+                                  end='', flush=True)
+
+                    print()   # newline after countdown/input
+
+                    answer = answer_box['val']
+
+                    # ── Case B : User declined ────────────────────────────────
                     if answer == 'n':
-                        # ── Case B: User declined ─────────────────────────────
                         print(f"{RED}[-] Operation cancelled. "
                               f"Returning to main menu.{RESET}")
 
+                    # ── Case A (y) or Case C (timeout) ───────────────────────
                     else:
-                        # ── Case A (y) or Case C (timeout) ───────────────────
                         if answer == 'y':
                             print(f"{GREEN}[+] Thanks for confirmation. "
                                   f"File directly sending to API...{RESET}")
@@ -903,81 +925,108 @@ def scan_file():
 
                         print(f"\n{YELLOW}[*] Uploading 'temp_file' "
                               f"to VirusTotal...{RESET}")
-                        try:
-                            vt_up_headers = {'x-apikey': get_vt_key()}
-                            with open(filepath, 'rb') as f:
-                                up_resp = requests.post(
-                                    'https://www.virustotal.com/api/v3/files',
-                                    headers=vt_up_headers,
-                                    files={'file': ('temp_file', f)},
-                                    timeout=120
-                                )
-                            if up_resp.status_code == 200:
-                                analysis_id = (up_resp.json()
-                                               .get('data', {})
-                                               .get('id', ''))
-                                print(f"{YELLOW}[*] File uploaded. Waiting "
-                                      f"for VirusTotal engines...{RESET}")
 
-                                final_attrs = None
-                                while True:
-                                    time.sleep(2)
-                                    try:
-                                        poll = requests.get(
-                                            f'https://www.virustotal.com'
-                                            f'/api/v3/analyses/{analysis_id}',
-                                            headers=vt_up_headers,
-                                            timeout=15
-                                        )
-                                        if poll.status_code == 200:
-                                            pa = (poll.json()
-                                                  .get('data', {})
-                                                  .get('attributes', {}))
-                                            if pa.get('status') == 'completed':
-                                                final_attrs = pa
-                                                break
-                                            print(f"{YELLOW}[*] Analysis in "
-                                                  f"progress... Retrying in "
-                                                  f"2s (Waiting for "
-                                                  f"results){RESET}")
-                                        else:
-                                            print(f"{RED}[!] Poll error: "
-                                                  f"HTTP {poll.status_code}"
-                                                  f"{RESET}")
-                                            break
-                                    except requests.exceptions.ConnectionError:
-                                        print(f"{RED}[!] Network error "
-                                              f"during polling.{RESET}")
-                                        break
+                        # ── Upload in background + spinner ────────────────────
+                        up_result = {'resp': None, 'err': None}
+                        up_done   = threading.Event()
 
-                                if final_attrs:
-                                    os.system('clear')
-                                    print(BANNER)
-                                    print(f"{GREEN}[::] FILE SCAN RESULTS "
-                                          f"[::]  {RESET}\n")
-                                    print(f"{CYAN}[*] Target  : temp_file "
-                                          f"({size_mb:.1f} MB — "
-                                          f"full upload){RESET}")
-                                    print(f"{CYAN}[*] SHA-256 : "
-                                          f"{file_hash}{RESET}")
-                                    _display_vt_file_report(
-                                        final_attrs, analysis_id
+                        def _do_upload():
+                            try:
+                                vt_up = {'x-apikey': get_vt_key()}
+                                with open(filepath, 'rb') as uf:
+                                    up_result['resp'] = requests.post(
+                                        'https://www.virustotal.com'
+                                        '/api/v3/files',
+                                        headers=vt_up,
+                                        files={'file': ('temp_file', uf)},
+                                        timeout=600
                                     )
-                                else:
-                                    print(f"{RED}[!] Analysis could not "
-                                          f"be retrieved.{RESET}")
+                            except Exception as e:
+                                up_result['err'] = e
+                            finally:
+                                up_done.set()
 
-                            elif up_resp.status_code == 401:
-                                print(f"{RED}[!] Unauthorized.{RESET}")
+                        up_thread = threading.Thread(
+                            target=_do_upload, daemon=True
+                        )
+                        up_thread.start()
+
+                        # Spinner while upload runs
+                        spinner = ['|', '/', '-', '\\']
+                        si = 0
+                        while not up_done.wait(timeout=0.5):
+                            print(f"\r{YELLOW}[*] Uploading large file... "
+                                  f"{spinner[si % 4]}{RESET}",
+                                  end='', flush=True)
+                            si += 1
+                        print()
+
+                        if up_result['err']:
+                            print(f"{RED}[!] Upload error: "
+                                  f"{up_result['err']}{RESET}")
+                        elif up_result['resp'] is None:
+                            print(f"{RED}[!] Upload failed: "
+                                  f"No response.{RESET}")
+                        elif up_result['resp'].status_code == 200:
+                            analysis_id = (up_result['resp'].json()
+                                           .get('data', {})
+                                           .get('id', ''))
+                            print(f"{YELLOW}[*] File uploaded. Waiting "
+                                  f"for VirusTotal engines...{RESET}")
+
+                            final_attrs = None
+                            while True:
+                                time.sleep(2)
+                                try:
+                                    poll = requests.get(
+                                        f'https://www.virustotal.com'
+                                        f'/api/v3/analyses/{analysis_id}',
+                                        headers={'x-apikey': get_vt_key()},
+                                        timeout=15
+                                    )
+                                    if poll.status_code == 200:
+                                        pa = (poll.json()
+                                              .get('data', {})
+                                              .get('attributes', {}))
+                                        if pa.get('status') == 'completed':
+                                            final_attrs = pa
+                                            break
+                                        print(f"{YELLOW}[*] Analysis in "
+                                              f"progress... Retrying in 2s "
+                                              f"(Waiting for results){RESET}")
+                                    else:
+                                        print(f"{RED}[!] Poll error: "
+                                              f"HTTP {poll.status_code}"
+                                              f"{RESET}")
+                                        break
+                                except requests.exceptions.ConnectionError:
+                                    print(f"{RED}[!] Network error "
+                                          f"during polling.{RESET}")
+                                    break
+
+                            if final_attrs:
+                                os.system('clear')
+                                print(BANNER)
+                                print(f"{GREEN}[::] FILE SCAN RESULTS "
+                                      f"[::]  {RESET}\n")
+                                print(f"{CYAN}[*] Target  : temp_file "
+                                      f"({size_mb:.1f} MB — "
+                                      f"full upload){RESET}")
+                                print(f"{CYAN}[*] SHA-256 : "
+                                      f"{file_hash}{RESET}")
+                                _display_vt_file_report(
+                                    final_attrs, analysis_id
+                                )
                             else:
-                                print(f"{RED}[!] Upload failed: "
-                                      f"HTTP {up_resp.status_code}{RESET}")
+                                print(f"{RED}[!] Analysis could not "
+                                      f"be retrieved.{RESET}")
 
-                        except requests.exceptions.ConnectionError:
-                            print(f"{RED}[!] Network error during "
-                                  f"upload.{RESET}")
-                        except Exception as e:
-                            print(f"{RED}[!] Error: {e}{RESET}")
+                        elif up_result['resp'].status_code == 401:
+                            print(f"{RED}[!] Unauthorized.{RESET}")
+                        else:
+                            print(f"{RED}[!] Upload failed: HTTP "
+                                  f"{up_result['resp'].status_code}"
+                                  f"{RESET}")
                 elif hash_resp.status_code == 401:
                     print(f"{RED}[!] Unauthorized — check API key.{RESET}")
                 else:
