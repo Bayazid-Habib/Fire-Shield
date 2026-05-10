@@ -7,6 +7,7 @@ import time
 import threading
 import shutil
 import textwrap
+import hashlib
 
 # ─── ANSI Color Codes ─────────────────────────────────────────────────────────
 RED    = '\033[91m'
@@ -49,6 +50,9 @@ def smart_print(text, color='', indent=0):
 # ─── Reverse-Base64 Masked API Keys (DO NOT MODIFY) ───────────────────────────
 _VT_MASKED  = "YzU5MGE0NjY1ODRkMTNlNmZiZjllOGIxNzdiMzlhYzlmNTg3ZmE0Yzk1Y2Q3MThjZjYwZjRlMjdlM2ZkN2Q1Nw=="
 _URL_MASKED = "NmQ1NTMyZjIwZDIyLTZhZmItOTY0Ny0xM2NlLWMzNWZjOTEw"
+
+# ─── File Scan Size Limit ─────────────────────────────────────────────────────
+FILE_SIZE_LIMIT = 50 * 1024 * 1024   # 50 MB
 
 def _decode_key(masked):
     try:
@@ -97,33 +101,48 @@ ASCII_LINES = [
 
 WIDTH = 58
 
-# ─── Animated Banner (runs once at startup) ───────────────────────────────────
+# ─── Animated Banner (infinite shimmer until Enter is pressed) ────────────────
 def banner():
     credit  = "[-] Tool Created by Bayazid Habib [-]"
     version = "Version : 0.1"
-    flame_frames = [YELLOW, RED, YELLOW, RED, YELLOW, RED]
+    prompt  = "[ Press Enter to run the tool ]"
 
-    for base_color in flame_frames:
-        os.system('clear')
-        print()
-        for i, line in enumerate(ASCII_LINES):
-            color = YELLOW if i % 2 == 0 else RED
-            if base_color == RED:
-                color = RED if i % 2 == 0 else YELLOW
-            print(color + line.center(WIDTH) + RESET)
-        print()
-        print(GREEN + credit.center(WIDTH)  + RESET)
-        print(WHITE + version.center(WIDTH) + RESET)
-        print()
-        time.sleep(0.2)
+    stop_flag   = {'stop': False}
+    frame_cycle = [YELLOW, RED, YELLOW, RED, YELLOW, RED]
 
-    # Final settled frame
+    def _animate():
+        idx = 0
+        while not stop_flag['stop']:
+            base_color = frame_cycle[idx % len(frame_cycle)]
+            os.system('clear')
+            print()
+            for i, line in enumerate(ASCII_LINES):
+                color = YELLOW if i % 2 == 0 else RED
+                if base_color == RED:
+                    color = RED if i % 2 == 0 else YELLOW
+                print(color + line.center(WIDTH) + RESET)
+            print()
+            print(GREEN + credit.center(WIDTH) + RESET)
+            print(WHITE + version.center(WIDTH) + RESET)
+            print()
+            print(CYAN + prompt.center(WIDTH) + RESET)
+            time.sleep(0.2)
+            idx += 1
+
+    anim_thread = threading.Thread(target=_animate, daemon=True)
+    anim_thread.start()
+
+    input()                    # Blocks until user presses Enter
+    stop_flag['stop'] = True
+    anim_thread.join(timeout=0.5)
+
+    # Final settled frame — full YELLOW, no flicker
     os.system('clear')
     print()
     for line in ASCII_LINES:
         print(YELLOW + line.center(WIDTH) + RESET)
     print()
-    print(GREEN + credit.center(WIDTH)  + RESET)
+    print(GREEN + credit.center(WIDTH) + RESET)
     print(WHITE + version.center(WIDTH) + RESET)
     print()
     time.sleep(0.4)
@@ -710,63 +729,167 @@ def scan_file():
         input(f"\n{YELLOW}[*] Press Enter to return to menu...{RESET}")
         return
 
-    print(f"\n{YELLOW}[*] Uploading 'temp_file' to VirusTotal...{RESET}")
+    # ── File Size Detection ────────────────────────────────────────────────────
+    print(f"\n{GREEN}[*] Checking file size...{RESET}")
+    file_size = os.path.getsize(filepath)
+
     try:
-        vt_headers = {'x-apikey': get_vt_key()}
-        with open(filepath, 'rb') as f:
-            upload_resp = requests.post(
-                'https://www.virustotal.com/api/v3/files',
-                headers=vt_headers,
-                files={'file': (TEMP_FILE, f)},
-                timeout=60
-            )
-        if upload_resp.status_code == 200:
-            analysis_id = upload_resp.json().get('data', {}).get('id', '')
-            print(f"{YELLOW}[*] File uploaded. Waiting for VirusTotal engines...{RESET}")
+        if file_size <= FILE_SIZE_LIMIT:
 
-            final_attrs = None
-            while True:
-                time.sleep(2)
-                try:
-                    poll_resp = requests.get(
-                        f'https://www.virustotal.com/api/v3/analyses/{analysis_id}',
-                        headers=vt_headers,
-                        timeout=15
-                    )
-                    if poll_resp.status_code == 200:
-                        poll_attrs = poll_resp.json().get('data', {}).get('attributes', {})
-                        status     = poll_attrs.get('status', '')
-                        if status == 'completed':
-                            final_attrs = poll_attrs
-                            break
+            # ══════════════════════════════════════════════════════════════════
+            # PATH A : Direct Upload (≤ 50 MB)
+            # ══════════════════════════════════════════════════════════════════
+            print(f"{GREEN}[+] File size is in limit. Sending to API...{RESET}")
+            print(f"\n{YELLOW}[*] Uploading 'temp_file' to VirusTotal...{RESET}")
+
+            vt_headers = {'x-apikey': get_vt_key()}
+            with open(filepath, 'rb') as f:
+                upload_resp = requests.post(
+                    'https://www.virustotal.com/api/v3/files',
+                    headers=vt_headers,
+                    files={'file': (TEMP_FILE, f)},
+                    timeout=60
+                )
+
+            if upload_resp.status_code == 200:
+                analysis_id = upload_resp.json().get('data', {}).get('id', '')
+                print(f"{YELLOW}[*] File uploaded. Waiting for VirusTotal engines...{RESET}")
+
+                final_attrs = None
+                while True:
+                    time.sleep(2)
+                    try:
+                        poll_resp = requests.get(
+                            f'https://www.virustotal.com/api/v3/analyses/{analysis_id}',
+                            headers=vt_headers,
+                            timeout=15
+                        )
+                        if poll_resp.status_code == 200:
+                            poll_attrs = poll_resp.json().get('data', {}).get('attributes', {})
+                            if poll_attrs.get('status', '') == 'completed':
+                                final_attrs = poll_attrs
+                                break
+                            else:
+                                print(f"{YELLOW}[*] Analysis in progress... "
+                                      f"Retrying in 2s (Waiting for results){RESET}")
                         else:
-                            print(f"{YELLOW}[*] Analysis in progress... "
-                                  f"Retrying in 2s (Waiting for results){RESET}")
-                    else:
-                        print(f"{RED}[!] Poll error: HTTP {poll_resp.status_code}{RESET}")
+                            print(f"{RED}[!] Poll error: HTTP {poll_resp.status_code}{RESET}")
+                            break
+                    except requests.exceptions.ConnectionError:
+                        print(f"{RED}[!] Network error during polling.{RESET}")
                         break
-                except requests.exceptions.ConnectionError:
-                    print(f"{RED}[!] Network error during polling.{RESET}")
-                    break
 
-            if final_attrs:
-                os.system('clear')
-                print(BANNER)
-                print(f"{GREEN}[::] FILE SCAN RESULTS [::]  {RESET}\n")
-                print(f"{CYAN}[*] Target : temp_file{RESET}")
-                _display_vt_file_report(final_attrs, analysis_id)
+                if final_attrs:
+                    os.system('clear')
+                    print(BANNER)
+                    print(f"{GREEN}[::] FILE SCAN RESULTS [::]  {RESET}\n")
+                    print(f"{CYAN}[*] Target : temp_file{RESET}")
+                    _display_vt_file_report(final_attrs, analysis_id)
+                else:
+                    print(f"{RED}[!] Analysis could not be retrieved. Check network and try again.{RESET}")
+
+            elif upload_resp.status_code == 401:
+                print(f"{RED}[!] Unauthorized.{RESET}")
             else:
-                print(f"{RED}[!] Analysis could not be retrieved. Check network and try again.{RESET}")
-        elif upload_resp.status_code == 401:
-            print(f"{RED}[!] Unauthorized.{RESET}")
+                print(f"{RED}[!] Upload failed: HTTP {upload_resp.status_code}{RESET}")
+
         else:
-            print(f"{RED}[!] Upload failed: HTTP {upload_resp.status_code}{RESET}")
+
+            # ══════════════════════════════════════════════════════════════════
+            # PATH B : Large File — SHA-256 Hash Lookup (> 50 MB)
+            # ══════════════════════════════════════════════════════════════════
+            size_mb = file_size / (1024 * 1024)
+            print(f"{RED}[!] File Size is too large ({size_mb:.1f} MB). "
+                  f"File cannot be directly sent to API.{RESET}")
+
+            # Real-time countdown on a single line
+            for i in range(5, 0, -1):
+                print(f"\r{YELLOW}[*] Proceeding in [{i}] sec...{RESET}",
+                      end='', flush=True)
+                time.sleep(1)
+            print()   # move to next line after countdown
+
+            print(f"\n{GREEN}[+] Automatically proceeding to next action...{RESET}")
+            time.sleep(3)
+
+            # Local hashing engine
+            print(f"\n{YELLOW}[*] Initializing Local Engine: "
+                  f"Analyzing Binary Structure...{RESET}")
+            time.sleep(1)
+            print(f"{YELLOW}[*] Generating Unique File Signature (SHA-256)...{RESET}")
+
+            sha256     = hashlib.sha256()
+            CHUNK_SIZE = 65536   # 64 KB — safe for large files in Termux
+            try:
+                with open(filepath, 'rb') as f:
+                    while True:
+                        chunk = f.read(CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        sha256.update(chunk)
+                file_hash = sha256.hexdigest()
+            except Exception as e:
+                print(f"{RED}[!] Error reading file: {e}{RESET}")
+                input(f"\n{YELLOW}[*] Press Enter to return to menu...{RESET}")
+                return
+
+            print(f"{YELLOW}[*] Finalizing Integrity Check...{RESET}")
+            time.sleep(0.5)
+            print(f"{GREEN}[v] File Hash Generated Successfully{RESET}")
+            print(f"{CYAN}    SHA-256 : {file_hash}{RESET}")
+
+            time.sleep(3)
+            print(f"\n{YELLOW}[*] Automatically Sending to API for "
+                  f"Cloud Intelligence Scan...{RESET}")
+
+            # VT hash lookup — /files/{sha256}
+            try:
+                vt_headers = {'x-apikey': get_vt_key()}
+                hash_resp  = requests.get(
+                    f'https://www.virustotal.com/api/v3/files/{file_hash}',
+                    headers=vt_headers,
+                    timeout=15
+                )
+                if hash_resp.status_code == 200:
+                    vt_data = hash_resp.json().get('data', {}).get('attributes', {})
+                    # Remap VT file report keys to match _display_vt_file_report
+                    mapped_attrs = {
+                        'stats':   vt_data.get('last_analysis_stats',   {}),
+                        'results': vt_data.get('last_analysis_results', {}),
+                        'status':  'completed',
+                    }
+                    os.system('clear')
+                    print(BANNER)
+                    print(f"{GREEN}[::] FILE SCAN RESULTS (Hash Lookup) [::]  {RESET}\n")
+                    print(f"{CYAN}[*] Target  : temp_file "
+                          f"({size_mb:.1f} MB — hash-based scan){RESET}")
+                    print(f"{CYAN}[*] SHA-256 : {file_hash}{RESET}")
+                    _display_vt_file_report(mapped_attrs, file_hash, scan_type='file')
+
+                elif hash_resp.status_code == 404:
+                    print(f"\n{YELLOW}[~] Hash not found in VirusTotal database.{RESET}")
+                    smart_print(
+                        "This file has not been previously analyzed by VirusTotal. "
+                        "No cloud record exists for this SHA-256 hash. "
+                        "Consider uploading a smaller representative sample.",
+                        color=CYAN, indent=2
+                    )
+                elif hash_resp.status_code == 401:
+                    print(f"{RED}[!] Unauthorized — check API key.{RESET}")
+                else:
+                    print(f"{RED}[!] VT API Error: HTTP {hash_resp.status_code}{RESET}")
+
+            except requests.exceptions.ConnectionError:
+                print(f"{RED}[!] Network error during hash lookup.{RESET}")
+            except Exception as e:
+                print(f"{RED}[!] Error: {e}{RESET}")
+
     except requests.exceptions.ConnectionError:
         print(f"{RED}[!] Network error during upload.{RESET}")
     except Exception as e:
         print(f"{RED}[!] Error: {e}{RESET}")
     finally:
-        # ── Cleanup: delete temp_file regardless of outcome ────────────────────
+        # ── Cleanup: delete temp_file regardless of path or outcome ───────────
         if os.path.isfile(filepath):
             try:
                 os.remove(filepath)
