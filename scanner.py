@@ -933,10 +933,29 @@ def scan_file():
                         def _do_upload():
                             try:
                                 vt_up = {'x-apikey': get_vt_key()}
+
+                                # Step 1: Get special upload URL for large files
+                                # VT standard endpoint only accepts up to 32MB.
+                                # Files larger than that MUST use this endpoint.
+                                url_req = requests.get(
+                                    'https://www.virustotal.com'
+                                    '/api/v3/files/upload_url',
+                                    headers=vt_up,
+                                    timeout=15
+                                )
+                                if url_req.status_code == 200:
+                                    upload_url = url_req.json().get('data')
+                                else:
+                                    up_result['err'] = (
+                                        f"Could not get upload URL: "
+                                        f"HTTP {url_req.status_code}"
+                                    )
+                                    return
+
+                                # Step 2: POST file to the special upload URL
                                 with open(filepath, 'rb') as uf:
                                     up_result['resp'] = requests.post(
-                                        'https://www.virustotal.com'
-                                        '/api/v3/files',
+                                        upload_url,
                                         headers=vt_up,
                                         files={'file': ('temp_file', uf)},
                                         timeout=600
