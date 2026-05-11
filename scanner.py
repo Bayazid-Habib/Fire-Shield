@@ -9,6 +9,7 @@ import shutil
 import textwrap
 import hashlib
 import select
+import uuid
 
 # ─── ANSI Color Codes ─────────────────────────────────────────────────────────
 RED    = '\033[91m'
@@ -926,70 +927,99 @@ def scan_file():
                         print(f"\n{YELLOW}[*] Uploading 'temp_file' "
                               f"to VirusTotal...{RESET}")
 
-                        # ── Progress-tracked upload ───────────────────────────
-                        up_result  = {'resp': None, 'err': None}
-                        up_done    = threading.Event()
-                        up_progress = {
-                            'sent':  0,
-                            'total': file_size,
-                        }
+                        # ══════════════════════════════════════════════════════
+                        # Streaming multipart upload — no full-file buffering.
+                        # The generator yields 128KB chunks directly from disk
+                        # to the socket, keeping Termux RAM usage near zero.
+                        # up_progress['sent'] is updated per chunk so the bar
+                        # reflects bytes actually fed into the network stream.
+                        # ══════════════════════════════════════════════════════
+                        CHUNK_SIZE  = 131072   # 128 KB per chunk
+                        up_result   = {'resp': None, 'err': None}
+                        up_done     = threading.Event()
+                        up_progress = {'sent': 0, 'total': file_size}
 
-                        class ProgressFileWrapper:
-                            """
-                            Wraps a file object and intercepts every read()
-                            call to track bytes sent in real time.
-                            """
-                            def __init__(self, fobj, progress):
-                                self._fobj     = fobj
-                                self._progress = progress
-
-                            def read(self, size=-1):
-                                chunk = self._fobj.read(size)
-                                self._progress['sent'] += len(chunk)
-                                return chunk
-
-                            # requests inspects these attributes
-                            def __len__(self):
-                                return self._progress['total']
-
-                            @property
-                            def len(self):
-                                return (self._progress['total']
-                                        - self._progress['sent'])
+                        def _multipart_stream(boundary, file_obj):
+                            """Yield raw multipart bytes in 128KB chunks."""
+                            header = (
+                                f'--{boundary}\r\n'
+                                f'Content-Disposition: form-data; '
+                                f'name="file"; filename="temp_file"\r\n'
+                                f'Content-Type: application/octet-stream\r\n'
+                                f'\r\n'
+                            ).encode('utf-8')
+                            yield header
+                            while True:
+                                chunk = file_obj.read(CHUNK_SIZE)
+                                if not chunk:
+                                    break
+                                up_progress['sent'] += len(chunk)
+                                yield chunk
+                            yield f'\r\n--{boundary}--\r\n'.encode('utf-8')
 
                         def _do_upload():
                             try:
                                 vt_up = {'x-apikey': get_vt_key()}
 
-                                # Step 1: get large-file upload URL
+                                # Step 1: get large-file upload URL (>32MB)
                                 url_req = requests.get(
                                     'https://www.virustotal.com'
                                     '/api/v3/files/upload_url',
                                     headers=vt_up,
                                     timeout=15
                                 )
-                                if url_req.status_code == 200:
-                                    upload_url = url_req.json().get('data')
-                                else:
+                                if url_req.status_code != 200:
                                     up_result['err'] = (
-                                        f"Could not get upload URL: "
+                                        f"Upload URL error: "
                                         f"HTTP {url_req.status_code}"
                                     )
                                     return
+                                upload_url = url_req.json().get('data')
 
-                                # Step 2: upload with progress wrapper
+                                # Step 2: compute exact Content-Length
+                                boundary = uuid.uuid4().hex
+                                hdr = (
+                                    f'--{boundary}\r\n'
+                                    f'Content-Disposition: form-data; '
+                                    f'name="file"; filename="temp_file"\r\n'
+                                    f'Content-Type: application/octet-stream\r\n'
+                                    f'\r\n'
+                                ).encode('utf-8')
+                                ftr = f'\r\n--{boundary}--\r\n'.encode('utf-8')
+                                content_length = (
+                                    len(hdr) + file_size + len(ftr)
+                                )
+
+                                post_headers = {
+                                    **vt_up,
+                                    'Content-Type': (
+                                        f'multipart/form-data; '
+                                        f'boundary={boundary}'
+                                    ),
+                                    'Content-Length': str(content_length),
+                                }
+
+                                # Step 3: stream upload — disk → socket, no RAM buffer
                                 with open(filepath, 'rb') as raw_f:
-                                    wrapped = ProgressFileWrapper(
-                                        raw_f, up_progress
+                                    stream = _multipart_stream(
+                                        boundary, raw_f
                                     )
                                     up_result['resp'] = requests.post(
                                         upload_url,
-                                        headers=vt_up,
-                                        files={'file': ('temp_file', wrapped)},
-                                        timeout=600
+                                        headers=post_headers,
+                                        data=stream,
+                                        timeout=None   # never cut off large uploads
                                     )
+
+                            except requests.exceptions.ConnectionError as e:
+                                up_result['err'] = f"Connection lost: {e}"
+                            except BrokenPipeError:
+                                up_result['err'] = (
+                                    "Broken pipe — server closed "
+                                    "connection mid-upload."
+                                )
                             except Exception as e:
-                                up_result['err'] = e
+                                up_result['err'] = str(e)
                             finally:
                                 up_done.set()
 
@@ -998,66 +1028,56 @@ def scan_file():
                         )
                         up_thread.start()
 
-                        # ── Real-time progress bar + ETA ──────────────────────
-                        BAR_W      = 20       # width of the filled bar
-                        start_ts   = time.time()
-                        last_sent  = 0
-                        last_ts    = start_ts
+                        # ── Progress bar (reflects streaming bytes) ───────────
+                        BAR_W    = 18
+                        start_ts = time.time()
+                        last_s   = 0
+                        last_t   = start_ts
 
-                        print()   # blank line before bar
+                        print(f"\n{CYAN}[*] Streaming {total_mb:.1f} MB "
+                              f"in 128 KB chunks...{RESET}")
+                        print(f"{CYAN}[*] timeout=None — will not cut off.{RESET}\n")
 
                         while not up_done.wait(timeout=0.5):
                             sent  = up_progress['sent']
                             total = up_progress['total']
                             now   = time.time()
 
-                            # Overall speed (bytes/s) — smoothed over last tick
-                            delta_bytes = sent - last_sent
-                            delta_time  = max(now - last_ts, 0.001)
-                            speed       = delta_bytes / delta_time   # B/s
-                            last_sent   = sent
-                            last_ts     = now
+                            dt    = max(now - last_t, 0.001)
+                            speed = (sent - last_s) / dt          # B/s
+                            last_s, last_t = sent, now
 
-                            # Progress fraction
-                            pct      = sent / total if total > 0 else 0
-                            filled   = int(BAR_W * pct)
-                            bar      = ('█' * filled
-                                        + '░' * (BAR_W - filled))
+                            pct    = sent / total if total > 0 else 0
+                            filled = int(BAR_W * pct)
+                            bar    = '█' * filled + '░' * (BAR_W - filled)
 
-                            # Human-readable sizes
-                            sent_mb  = sent  / (1024 * 1024)
-                            total_mb = total / (1024 * 1024)
-                            speed_mb = speed / (1024 * 1024)
+                            s_mb   = sent / (1024 * 1024)
+                            t_mb   = total / (1024 * 1024)
+                            sp_mb  = speed / (1024 * 1024)
 
-                            # ETA
-                            remaining = total - sent
+                            rem    = total - sent
                             if speed > 0:
-                                eta_s = int(remaining / speed)
-                                eta   = (f"{eta_s // 60:02d}m"
-                                         f"{eta_s % 60:02d}s")
+                                eta_s = int(rem / speed)
+                                eta   = (f"{eta_s//60:02d}m"
+                                         f"{eta_s%60:02d}s")
                             else:
                                 eta = '--:--'
 
                             print(
-                                f"\r{YELLOW}[{bar}] "
-                                f"{pct*100:5.1f}%  "
-                                f"{sent_mb:.1f}/{total_mb:.1f} MB  "
-                                f"{speed_mb:.2f} MB/s  "
+                                f"\r{YELLOW}[{bar}] {pct*100:5.1f}%  "
+                                f"{s_mb:.1f}/{t_mb:.1f} MB  "
+                                f"{sp_mb:.2f} MB/s  "
                                 f"ETA {eta}{RESET}",
                                 end='', flush=True
                             )
 
-                        # Final 100% bar after upload completes
-                        bar      = '█' * BAR_W
-                        total_mb = file_size / (1024 * 1024)
-                        elapsed  = max(time.time() - start_ts, 0.001)
-                        avg_spd  = (file_size / elapsed) / (1024 * 1024)
+                        # Final settled bar
+                        elapsed = max(time.time() - start_ts, 0.001)
+                        avg_sp  = (file_size / elapsed) / (1024 * 1024)
                         print(
-                            f"\r{GREEN}[{bar}] "
-                            f"100.0%  "
+                            f"\r{GREEN}[{'█'*BAR_W}] 100.0%  "
                             f"{total_mb:.1f}/{total_mb:.1f} MB  "
-                            f"{avg_spd:.2f} MB/s  "
-                            f"Done          {RESET}"
+                            f"{avg_sp:.2f} MB/s  Done{' '*10}{RESET}"
                         )
 
                         if up_result['err']:
