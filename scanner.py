@@ -926,17 +926,42 @@ def scan_file():
                         print(f"\n{YELLOW}[*] Uploading 'temp_file' "
                               f"to VirusTotal...{RESET}")
 
-                        # ── Upload in background + spinner ────────────────────
-                        up_result = {'resp': None, 'err': None}
-                        up_done   = threading.Event()
+                        # ── Progress-tracked upload ───────────────────────────
+                        up_result  = {'resp': None, 'err': None}
+                        up_done    = threading.Event()
+                        up_progress = {
+                            'sent':  0,
+                            'total': file_size,
+                        }
+
+                        class ProgressFileWrapper:
+                            """
+                            Wraps a file object and intercepts every read()
+                            call to track bytes sent in real time.
+                            """
+                            def __init__(self, fobj, progress):
+                                self._fobj     = fobj
+                                self._progress = progress
+
+                            def read(self, size=-1):
+                                chunk = self._fobj.read(size)
+                                self._progress['sent'] += len(chunk)
+                                return chunk
+
+                            # requests inspects these attributes
+                            def __len__(self):
+                                return self._progress['total']
+
+                            @property
+                            def len(self):
+                                return (self._progress['total']
+                                        - self._progress['sent'])
 
                         def _do_upload():
                             try:
                                 vt_up = {'x-apikey': get_vt_key()}
 
-                                # Step 1: Get special upload URL for large files
-                                # VT standard endpoint only accepts up to 32MB.
-                                # Files larger than that MUST use this endpoint.
+                                # Step 1: get large-file upload URL
                                 url_req = requests.get(
                                     'https://www.virustotal.com'
                                     '/api/v3/files/upload_url',
@@ -952,12 +977,15 @@ def scan_file():
                                     )
                                     return
 
-                                # Step 2: POST file to the special upload URL
-                                with open(filepath, 'rb') as uf:
+                                # Step 2: upload with progress wrapper
+                                with open(filepath, 'rb') as raw_f:
+                                    wrapped = ProgressFileWrapper(
+                                        raw_f, up_progress
+                                    )
                                     up_result['resp'] = requests.post(
                                         upload_url,
                                         headers=vt_up,
-                                        files={'file': ('temp_file', uf)},
+                                        files={'file': ('temp_file', wrapped)},
                                         timeout=600
                                     )
                             except Exception as e:
@@ -970,15 +998,67 @@ def scan_file():
                         )
                         up_thread.start()
 
-                        # Spinner while upload runs
-                        spinner = ['|', '/', '-', '\\']
-                        si = 0
+                        # ── Real-time progress bar + ETA ──────────────────────
+                        BAR_W      = 20       # width of the filled bar
+                        start_ts   = time.time()
+                        last_sent  = 0
+                        last_ts    = start_ts
+
+                        print()   # blank line before bar
+
                         while not up_done.wait(timeout=0.5):
-                            print(f"\r{YELLOW}[*] Uploading large file... "
-                                  f"{spinner[si % 4]}{RESET}",
-                                  end='', flush=True)
-                            si += 1
-                        print()
+                            sent  = up_progress['sent']
+                            total = up_progress['total']
+                            now   = time.time()
+
+                            # Overall speed (bytes/s) — smoothed over last tick
+                            delta_bytes = sent - last_sent
+                            delta_time  = max(now - last_ts, 0.001)
+                            speed       = delta_bytes / delta_time   # B/s
+                            last_sent   = sent
+                            last_ts     = now
+
+                            # Progress fraction
+                            pct      = sent / total if total > 0 else 0
+                            filled   = int(BAR_W * pct)
+                            bar      = ('█' * filled
+                                        + '░' * (BAR_W - filled))
+
+                            # Human-readable sizes
+                            sent_mb  = sent  / (1024 * 1024)
+                            total_mb = total / (1024 * 1024)
+                            speed_mb = speed / (1024 * 1024)
+
+                            # ETA
+                            remaining = total - sent
+                            if speed > 0:
+                                eta_s = int(remaining / speed)
+                                eta   = (f"{eta_s // 60:02d}m"
+                                         f"{eta_s % 60:02d}s")
+                            else:
+                                eta = '--:--'
+
+                            print(
+                                f"\r{YELLOW}[{bar}] "
+                                f"{pct*100:5.1f}%  "
+                                f"{sent_mb:.1f}/{total_mb:.1f} MB  "
+                                f"{speed_mb:.2f} MB/s  "
+                                f"ETA {eta}{RESET}",
+                                end='', flush=True
+                            )
+
+                        # Final 100% bar after upload completes
+                        bar      = '█' * BAR_W
+                        total_mb = file_size / (1024 * 1024)
+                        elapsed  = max(time.time() - start_ts, 0.001)
+                        avg_spd  = (file_size / elapsed) / (1024 * 1024)
+                        print(
+                            f"\r{GREEN}[{bar}] "
+                            f"100.0%  "
+                            f"{total_mb:.1f}/{total_mb:.1f} MB  "
+                            f"{avg_spd:.2f} MB/s  "
+                            f"Done          {RESET}"
+                        )
 
                         if up_result['err']:
                             print(f"{RED}[!] Upload error: "
