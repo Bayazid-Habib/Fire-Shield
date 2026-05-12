@@ -1170,6 +1170,268 @@ def scan_file():
                 print(f"\n{YELLOW}[~] Could not delete temp_file. Remove it manually.{RESET}")
 
     input(f"\n{YELLOW}[*] Press Enter to return to menu...{RESET}")
+# ─── Helper: Unix timestamp → readable string ────────────────────────────────
+def _fmt_ts(ts):
+    if not ts:
+        return 'N/A'
+    try:
+        import datetime
+        return datetime.datetime.utcfromtimestamp(ts).strftime('%Y-%m-%d %H:%M UTC')
+    except Exception:
+        return str(ts)
+
+# ─── Helper: IP Intelligence report (all non-engine VT fields) ───────────────
+def _display_ip_intel_report(attrs, ip, resolutions=None):
+    SEP = f"{CYAN}  {'─' * 44}{RESET}"
+    n   = 1
+
+    # ── Network Identity ───────────────────────────────────────────────────────
+    print(f"\n{SEP}")
+    print(f"  {CYAN}[#] NETWORK DETAILS ──────────────────────{RESET}")
+    print(SEP)
+    fields_net = [
+        ("IP Address",   ip),
+        ("Country",      attrs.get('country',    'N/A')),
+        ("Continent",    attrs.get('continent',   'N/A')),
+        ("ASN",          str(attrs.get('asn',     'N/A'))),
+        ("AS Owner",     attrs.get('as_owner',    'N/A')),
+        ("Network",      attrs.get('network',     'N/A')),
+        ("RIR",          attrs.get('regional_internet_registry', 'N/A')),
+    ]
+    for label, value in fields_net:
+        print(f"  {WHITE}{n}. {label:<22} : {GREEN}{value}{RESET}")
+        n += 1
+
+    # ── Reputation & Votes ─────────────────────────────────────────────────────
+    reputation = attrs.get('reputation', 0)
+    votes      = attrs.get('total_votes', {})
+    tags       = attrs.get('tags', [])
+    rep_color  = RED if reputation < 0 else (YELLOW if reputation == 0 else GREEN)
+
+    print(f"\n{SEP}")
+    print(f"  {CYAN}[#] REPUTATION & COMMUNITY ───────────────{RESET}")
+    print(SEP)
+    print(f"  {WHITE}{n}. Reputation Score    : {rep_color}{reputation}{RESET}"); n += 1
+    print(f"  {WHITE}{n}. Community Harmless  : {GREEN}{votes.get('harmless', 0)}{RESET}"); n += 1
+    print(f"  {WHITE}{n}. Community Malicious : {RED}{votes.get('malicious', 0)}{RESET}"); n += 1
+
+    # Security Tags — highlight dangerous ones in RED
+    if tags:
+        dangerous = {'tor', 'proxy', 'vpn', 'anonymizer', 'scanner', 'botnet'}
+        colored_tags = []
+        for tag in tags:
+            if tag.lower() in dangerous:
+                colored_tags.append(f"{RED}{tag}{RESET}{CYAN}")
+            else:
+                colored_tags.append(tag)
+        print(f"  {WHITE}{n}. Security Tags       : {CYAN}{', '.join(colored_tags)}{RESET}"); n += 1
+    else:
+        print(f"  {WHITE}{n}. Security Tags       : {GREEN}None{RESET}"); n += 1
+
+    # ── Analysis Dates ─────────────────────────────────────────────────────────
+    print(f"\n{SEP}")
+    print(f"  {CYAN}[#] ANALYSIS TIMELINE ────────────────────{RESET}")
+    print(SEP)
+    fields_dates = [
+        ("Last Analysis",  _fmt_ts(attrs.get('last_analysis_date'))),
+        ("Last Modified",  _fmt_ts(attrs.get('last_modification_date'))),
+        ("WHOIS Date",     _fmt_ts(attrs.get('whois_date'))),
+        ("Cert Last Seen", _fmt_ts(attrs.get('last_https_certificate_date'))),
+    ]
+    for label, value in fields_dates:
+        print(f"  {WHITE}{n}. {label:<22} : {YELLOW}{value}{RESET}")
+        n += 1
+
+    # ── Engine Summary ─────────────────────────────────────────────────────────
+    stats      = attrs.get('last_analysis_stats', {})
+    malicious  = stats.get('malicious', 0)
+    suspicious = stats.get('suspicious', 0)
+    harmless   = stats.get('harmless', 0)
+    undetected = stats.get('undetected', 0)
+    total      = malicious + suspicious + harmless + undetected
+    detections = malicious + suspicious
+
+    print(f"\n{SEP}")
+    print(f"  {CYAN}[#] ENGINE SUMMARY ───────────────────────{RESET}")
+    print(SEP)
+    det_color = RED if detections > 0 else GREEN
+    print(f"  {WHITE}{n}. Total Detections    : {det_color}{detections} / {total}{RESET}"); n += 1
+    print(f"  {WHITE}{n}. Malicious           : {RED if malicious > 0 else GREEN}{malicious}{RESET}"); n += 1
+    print(f"  {WHITE}{n}. Suspicious          : {YELLOW}{suspicious}{RESET}");         n += 1
+    print(f"  {WHITE}{n}. Harmless            : {GREEN}{harmless}{RESET}");            n += 1
+    print(f"  {WHITE}{n}. Undetected          : {WHITE}{undetected}{RESET}");          n += 1
+
+    # ── Passive DNS Resolutions ────────────────────────────────────────────────
+    if resolutions:
+        print(f"\n{SEP}")
+        print(f"  {CYAN}[#] PASSIVE DNS — Last 5 Resolutions ────{RESET}")
+        print(SEP)
+        for entry in resolutions:
+            r_attrs    = entry.get('attributes', {})
+            hostname   = r_attrs.get('host_name',    'N/A')
+            resolved   = _fmt_ts(r_attrs.get('date', None))
+            resolver   = r_attrs.get('resolver',     'N/A')
+            print(f"  {WHITE}{n}. {hostname:<32}{RESET}")
+            print(f"     {YELLOW}Resolved : {resolved}   "
+                  f"Resolver : {resolver}{RESET}")
+            n += 1
+    else:
+        print(f"\n{SEP}")
+        print(f"  {CYAN}[#] PASSIVE DNS ──────────────────────────{RESET}")
+        print(SEP)
+        print(f"  {YELLOW}{n}. No passive DNS data available.{RESET}"); n += 1
+
+    # ── HTTPS Certificate ──────────────────────────────────────────────────────
+    cert = attrs.get('last_https_certificate', {})
+    if cert:
+        subject    = cert.get('subject', {})
+        issuer     = cert.get('issuer', {})
+        validity   = cert.get('validity', {})
+        thumbprint = cert.get('thumbprint', 'N/A')
+        print(f"\n{SEP}")
+        print(f"  {CYAN}[#] HTTPS CERTIFICATE ────────────────────{RESET}")
+        print(SEP)
+        fields_cert = [
+            ("Subject CN",   subject.get('CN', 'N/A')),
+            ("Subject Org",  subject.get('O',  'N/A')),
+            ("Issuer CN",    issuer.get('CN',  'N/A')),
+            ("Issuer Org",   issuer.get('O',   'N/A')),
+            ("Valid From",   validity.get('not_before', 'N/A')),
+            ("Valid Until",  validity.get('not_after',  'N/A')),
+            ("Thumbprint",   thumbprint[:40] + '...'
+                             if len(thumbprint) > 40 else thumbprint),
+        ]
+        for label, value in fields_cert:
+            print(f"  {WHITE}{n}. {label:<22} : {YELLOW}{value}{RESET}")
+            n += 1
+
+    # ── WHOIS Snippet ──────────────────────────────────────────────────────────
+    whois_raw = attrs.get('whois', '')
+    if whois_raw:
+        print(f"\n{SEP}")
+        print(f"  {CYAN}[#] WHOIS — First 10 Lines ───────────────{RESET}")
+        print(SEP)
+        for line in whois_raw.splitlines()[:10]:
+            line = line.strip()
+            if line:
+                print(f"  {WHITE}{n}. {line}{RESET}")
+                n += 1
+
+    # ── Crowdsourced IDS Alerts ────────────────────────────────────────────────
+    ids_stats = attrs.get('crowdsourced_ids_stats', {})
+    if ids_stats:
+        print(f"\n{SEP}")
+        print(f"  {CYAN}[#] CROWDSOURCED IDS ALERTS ──────────────{RESET}")
+        print(SEP)
+        for severity in ('high', 'medium', 'low', 'info'):
+            count = ids_stats.get(severity, 0)
+            color = (RED if severity == 'high'
+                     else YELLOW if severity == 'medium'
+                     else WHITE)
+            print(f"  {color}{n}. IDS {severity.capitalize():<18} : {count}{RESET}")
+            n += 1
+
+    ids_results = attrs.get('crowdsourced_ids_results', [])
+    if ids_results:
+        print(f"\n  {CYAN}── IDS Rule Details (top 5) ──{RESET}")
+        for alert in ids_results[:5]:
+            rule_msg = alert.get('rule_msg',       'N/A')
+            severity = alert.get('alert_severity', 'N/A')
+            source   = alert.get('rule_source',    'N/A')
+            color    = RED if severity == 'high' else YELLOW
+            print(f"  {color}{n}. [{severity.upper()}] {rule_msg} ({source}){RESET}")
+            n += 1
+
+    # ── Crowdsourced Threat Context ────────────────────────────────────────────
+    context = attrs.get('crowdsourced_context', [])
+    if context:
+        print(f"\n{SEP}")
+        print(f"  {CYAN}[#] THREAT CONTEXT ───────────────────────{RESET}")
+        print(SEP)
+        for item in context[:5]:
+            title    = item.get('title',    'N/A')
+            details  = item.get('details',  '')
+            severity = item.get('severity', 'N/A')
+            source   = item.get('source',   'N/A')
+            color    = RED if severity in ('high', 'critical') else YELLOW
+            print(f"  {color}{n}. [{severity.upper()}] {title} — {source}{RESET}")
+            n += 1
+            if details:
+                smart_print(details, color=WHITE, indent=6)
+
+    # ── VT Report Link ─────────────────────────────────────────────────────────
+    print(f"\n{SEP}")
+    print(f"  {GREEN}{n}. VT Link : "
+          f"https://www.virustotal.com/gui/ip-address/{ip}{RESET}")
+    print(SEP)
+    return n
+
+# ─── Helper: IP full engine table ────────────────────────────────────────────
+def _display_ip_engine_report(attrs, ip, start_n=1):
+    SEP     = f"{CYAN}  {'─' * 44}{RESET}"
+    results = attrs.get('last_analysis_results', {})
+    stats   = attrs.get('last_analysis_stats',   {})
+
+    malicious  = stats.get('malicious', 0)
+    suspicious = stats.get('suspicious', 0)
+    harmless   = stats.get('harmless', 0)
+    undetected = stats.get('undetected', 0)
+    total      = malicious + suspicious + harmless + undetected
+    detections = malicious + suspicious
+
+    # Remap to match _display_vt_file_report structure
+    mapped = {
+        'stats':   stats,
+        'results': results,
+        'status':  'completed',
+    }
+    _display_vt_file_report(
+        mapped,
+        ip,
+        scan_type='ip-address',
+        start_n=start_n
+    )
+
+# ─── IP Report Sub-Menu ───────────────────────────────────────────────────────
+def _show_ip_report_menu(attrs, ip, resolutions=None):
+    while True:
+        os.system('clear')
+        print(BANNER)
+        print(f"{GREEN}[::] IP SCAN COMPLETE — SELECT REPORT [::]  {RESET}\n")
+        print(f"  {RED}[01]{RESET}  {GREEN}Network & Intelligence Report{RESET}")
+        print(f"  {RED}[02]{RESET}  {GREEN}Security Engine Report{RESET}")
+        print(f"  {RED}[03]{RESET}  {GREEN}Full Report (Both){RESET}")
+        print()
+        print(f"  {RED}[00]{RESET}  {GREEN}Back to Main Menu{RESET}")
+        print()
+        choice = input(f"{GREEN}[-] Select report : {RESET}").strip()
+
+        if choice == '00':
+            return
+
+        os.system('clear')
+        print(BANNER)
+        print(f"{GREEN}[::] IP SCAN RESULTS — {ip} [::]  {RESET}\n")
+
+        if choice == '01':
+            _display_ip_intel_report(attrs, ip, resolutions=resolutions)
+
+        elif choice == '02':
+            _display_ip_engine_report(attrs, ip, start_n=1)
+
+        elif choice == '03':
+            n = _display_ip_intel_report(attrs, ip, resolutions=resolutions)
+            print(f"\n{CYAN}  {'─' * 44}{RESET}")
+            print(f"  {CYAN}── Security Engines (continuing #{n}) ──{RESET}")
+            print(f"{CYAN}  {'─' * 44}{RESET}")
+            _display_ip_engine_report(attrs, ip, start_n=n)
+
+        else:
+            print(f"\n{YELLOW}[!] Invalid choice. Select 01, 02, 03, or 00.{RESET}")
+
+        input(f"\n{YELLOW}[*] Press Enter to return to Report Menu...{RESET}")
+
+# ─── Module 03 : IP Scanner (VirusTotal — Full Intelligence) ──────────────────
 def scan_ip():
     os.system('clear')
     print(BANNER)
@@ -1186,38 +1448,80 @@ def scan_ip():
         input(f"\n{YELLOW}[*] Press Enter to return to menu...{RESET}")
         return
 
-    print(f"\n{YELLOW}[*] Querying VirusTotal for IP: {ip}{RESET}")
+    # ── 5-second countdown ─────────────────────────────────────────────────────
+    print(f"\n{YELLOW}[!] Target locked: {ip}{RESET}")
+    for i in range(5, 0, -1):
+        print(f"\r{YELLOW}[*] Initializing scan engine in [{i}] sec...{RESET}",
+              end='', flush=True)
+        time.sleep(1)
+    print()
+
+    # ── 3-second system initialization ────────────────────────────────────────
+    print(f"\n{GREEN}[+] Automatically proceeding to intelligence scan...{RESET}")
+    time.sleep(1)
+    print(f"{YELLOW}[*] Initializing Local Engine: Connecting to VirusTotal...{RESET}")
+    time.sleep(1)
+    print(f"{YELLOW}[*] Fetching full IP intelligence report...{RESET}")
+    time.sleep(1)
+
     try:
-        vt_headers = {'x-apikey': get_vt_key()}
+        vt_headers  = {'x-apikey': get_vt_key()}
+
+        # ── Primary call: full IP attributes ──────────────────────────────────
         resp = requests.get(
             f'https://www.virustotal.com/api/v3/ip_addresses/{ip}',
             headers=vt_headers,
             timeout=15
         )
+
         if resp.status_code == 200:
-            attrs      = resp.json().get('data', {}).get('attributes', {})
-            stats      = attrs.get('last_analysis_stats', {})
-            country    = attrs.get('country', 'Unknown')
-            owner      = attrs.get('as_owner', 'Unknown')
-            reputation = attrs.get('reputation', 0)
+            attrs = resp.json().get('data', {}).get('attributes', {})
 
-            print(f"\n{CYAN}  ── IP Intelligence ──{RESET}")
-            print(f"  {WHITE}[i] Country    : {country}{RESET}")
-            print(f"  {WHITE}[i] Owner/ASN  : {owner}{RESET}")
-            print(f"  {WHITE}[i] Reputation : {reputation}{RESET}")
-            _display_vt_stats(stats, label="IP Report")
+            # ── Secondary call: passive DNS resolutions (last 5) ───────────────
+            resolutions = []
+            try:
+                dns_resp = requests.get(
+                    f'https://www.virustotal.com/api/v3/'
+                    f'ip_addresses/{ip}/resolutions?limit=5',
+                    headers=vt_headers,
+                    timeout=15
+                )
+                if dns_resp.status_code == 200:
+                    resolutions = dns_resp.json().get('data', [])
+                    print(f"{GREEN}[+] Passive DNS records fetched: "
+                          f"{len(resolutions)}{RESET}")
+                else:
+                    print(f"{YELLOW}[~] Passive DNS unavailable "
+                          f"(HTTP {dns_resp.status_code}){RESET}")
+            except Exception:
+                print(f"{YELLOW}[~] Passive DNS fetch failed. Continuing...{RESET}")
+
+            os.system('clear')
+            print(BANNER)
+            _show_ip_report_menu(attrs, ip, resolutions=resolutions)
+
         elif resp.status_code == 404:
-            print(f"{YELLOW}[~] IP not found in VirusTotal database.{RESET}")
-        elif resp.status_code == 401:
-            print(f"{RED}[!] Unauthorized.{RESET}")
-        else:
-            print(f"{RED}[!] HTTP {resp.status_code}{RESET}")
-    except requests.exceptions.ConnectionError:
-        print(f"{RED}[!] Network error.{RESET}")
-    except Exception as e:
-        print(f"{RED}[!] Error: {e}{RESET}")
+            print(f"\n{YELLOW}[~] IP not found in VirusTotal database.{RESET}")
+            input(f"\n{YELLOW}[*] Press Enter to return to menu...{RESET}")
 
-    input(f"\n{YELLOW}[*] Press Enter to return to menu...{RESET}")
+        elif resp.status_code == 401:
+            print(f"\n{RED}[!] Unauthorized — check API key.{RESET}")
+            input(f"\n{YELLOW}[*] Press Enter to return to menu...{RESET}")
+
+        elif resp.status_code == 429:
+            print(f"\n{RED}[!] Rate limit reached. Wait before retrying.{RESET}")
+            input(f"\n{YELLOW}[*] Press Enter to return to menu...{RESET}")
+
+        else:
+            print(f"\n{RED}[!] HTTP {resp.status_code}{RESET}")
+            input(f"\n{YELLOW}[*] Press Enter to return to menu...{RESET}")
+
+    except requests.exceptions.ConnectionError:
+        print(f"\n{RED}[!] Network error.{RESET}")
+        input(f"\n{YELLOW}[*] Press Enter to return to menu...{RESET}")
+    except Exception as e:
+        print(f"\n{RED}[!] Error: {e}{RESET}")
+        input(f"\n{YELLOW}[*] Press Enter to return to menu...{RESET}")
 
 # ─── Main Loop ────────────────────────────────────────────────────────────────
 def main():
