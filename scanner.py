@@ -654,8 +654,20 @@ def scan_url():
                 print(f"{RED}[!] URLscan.io poll error: {e}{RESET}")
                 break
 
-    # Wait for VT thread to finish before displaying anything
-    vt_thread.join(timeout=120)
+    # ── Wait for VT thread with live feedback (no silent freeze) ─────────────
+    if not vt_result['done']:
+        print(f"\n{YELLOW}[*] URLscan finished. "
+              f"Waiting for VirusTotal to complete...{RESET}")
+        tick = 0
+        while not vt_result['done']:
+            time.sleep(1)
+            tick += 1
+            print(
+                f"\r{YELLOW}[*] VirusTotal still scanning... "
+                f"{tick}s elapsed (Waiting for results){RESET}",
+                end='', flush=True
+            )
+        print()   # newline after the live counter
 
     # ── Clear polling clutter, then hand off to report sub-menu ───────────────
     os.system('clear')
