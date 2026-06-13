@@ -546,7 +546,7 @@ def scan_url():
         url_resp = requests.post(
             'https://urlscan.io/api/v1/scan/',
             headers={'API-Key': get_url_key(), 'Content-Type': 'application/json'},
-            json={"url": target_url, "visibility": "unlisted"},
+            json={"url": target_url, "visibility": "public"},
             timeout=15
         )
         if url_resp.status_code == 200:
